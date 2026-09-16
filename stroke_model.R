@@ -1,6 +1,9 @@
 #!/usr/bin/env Rscript
-# Stroke prediction model using logistic regression (base R only, no external packages).
+# Stroke prediction: logistic regression (base R) vs. random forest.
 # Data: data/healthcare-dataset-stroke-data.csv (public Kaggle dataset, via public GitHub mirror).
+
+.libPaths(c("~/R/library", .libPaths()))
+suppressPackageStartupMessages(library(randomForest))
 
 set.seed(42)
 
@@ -97,3 +100,42 @@ for (thresh in c(0.5, 0.3, 0.2, 0.15, 0.1, 0.05)) {
 cat("\nLowering the threshold trades false alarms for catching more real cases —\n")
 cat("the right tradeoff depends on the cost of a missed stroke vs. an unnecessary\n")
 cat("follow-up test, which is a clinical decision, not a modeling one.\n")
+
+## --- Comparison model: random forest ---
+## Class-imbalance-aware: sample equal stroke/no-stroke cases per tree via
+## `strata`/`sampsize`, which tends to raise sensitivity more than the logistic
+## model's raw class frequencies do.
+cat("\n=== Comparison: random forest ===\n")
+
+train_rf <- train
+train_rf$stroke <- factor(train_rf$stroke, levels = c(0, 1))
+n_pos <- sum(train_rf$stroke == 1)
+
+rf_model <- randomForest(
+  stroke ~ age + hypertension + heart_disease + avg_glucose_level + bmi +
+    gender + ever_married + work_type + residence_type + smoking_status,
+  data = train_rf,
+  ntree = 500,
+  strata = train_rf$stroke,
+  sampsize = c(`0` = n_pos, `1` = n_pos)  # balanced sampling per tree
+)
+
+rf_probs <- predict(rf_model, newdata = test, type = "prob")[, "1"]
+rf_auc <- compute_auc(rf_probs, test$stroke)
+
+cat("\nThreshold sweep (random forest, class-balanced sampling):\n")
+cat(sprintf("%-10s %-10s %-12s %-10s\n", "Threshold", "Accuracy", "Sensitivity", "Specificity"))
+for (thresh in c(0.5, 0.4, 0.3, 0.2)) {
+  p <- ifelse(rf_probs >= thresh, 1, 0)
+  acc <- mean(p == test$stroke)
+  tp <- sum(p == 1 & test$stroke == 1)
+  fn <- sum(p == 0 & test$stroke == 1)
+  tn <- sum(p == 0 & test$stroke == 0)
+  fp <- sum(p == 1 & test$stroke == 0)
+  sens <- if ((tp + fn) > 0) tp / (tp + fn) else NA
+  spec <- if ((tn + fp) > 0) tn / (tn + fp) else NA
+  cat(sprintf("%-10.2f %-10.3f %-12.3f %-10.3f\n", thresh, acc, sens, spec))
+}
+cat(sprintf("\nRandom forest AUC: %.3f (logistic regression: %.3f)\n", rf_auc, auc))
+cat("\nVariable importance (random forest):\n")
+print(importance(rf_model)[order(-importance(rf_model)[, 1]), , drop = FALSE])
